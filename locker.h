@@ -67,6 +67,7 @@ public:
         return pthread_cond_timedwait(&m_cond, mutex, &t) == 0;
     }
 
+    //唤醒等待条件变量的线程
     bool signal(pthread_mutex_t *mutex) {
         return pthread_cond_signal(&m_cond) == 0;
     }
