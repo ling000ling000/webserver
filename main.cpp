@@ -26,9 +26,11 @@ void addsig(int sig, void(handler)(int)) {
 }
 
 // 添加文件描述符到epoll
-extern int addfd(int epollfd, int fd, bool one_shot);
+extern void addfd(int epollfd, int fd, bool one_shot);
 // 从epoll中删除文件描述符
-extern int removefd(int epollfd, int fd);
+extern void removefd(int epollfd, int fd);
+// 从epoll中修改文件描述符
+extern void modfd(int epollfd, int fd, int ev);
 
 int main(int argc, char* argv[])
 {
@@ -77,7 +79,29 @@ int main(int argc, char* argv[])
     int epollfd = epoll_create(5);
 
     // 将监听的文件描述符添加到epoll对象中
+    addfd(epollfd, listenfd, false);
+    http_conn::m_epollfd = epollfd;
 
+    // 循环检测事件发生
+    while(1) {
+        int num = epoll_wait(epollfd, events, MAX_EVENT_NUMBER, -1);
+        if(num < 0 && errno != EINTR) {
+            printf("epoll failure\n");
+            break;
+        } 
+
+        // 循环遍历事件数组
+        for(int i = 0; i < num; i ++) {
+            int sockfd = events[i].data.fd;
+            if(sockfd == listenfd) { // 有客户端连接进来
+                struct sockaddr_in client_address;
+                socklen_t client_addrlen = sizeof(client_address);
+
+                accept(listenfd, (struct sockaddr*)&client_address, &client_addrlen);
+            }
+        }
+
+    }
 
     return 0;
 }
