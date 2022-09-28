@@ -45,7 +45,7 @@ private:
 };
 
 template<typename T>
-threadpool<T>::threadpool(int thread_number = 8, int max_requests = 10000) :
+threadpool<T>::threadpool(int thread_number, int max_requests) :
     m_thread_number(thread_number), m_max_requests(max_requests),
     m_stop(false), m_threads(NULL) {
         if((thread_number <= 0) || (max_requests <= 0)) {
@@ -66,7 +66,7 @@ threadpool<T>::threadpool(int thread_number = 8, int max_requests = 10000) :
                 throw std::exception();
             }
 
-            if(pthread_detach(m_thread[i])) {
+            if(pthread_detach(m_threads[i])) {
                 delete[] m_threads;
                 throw std::exception();
             }
@@ -83,7 +83,7 @@ threadpool<T>::~threadpool() {
 template<typename T>
 bool threadpool<T>::append(T* request) {
     m_queuelocker.lock();
-    if(m_queuelocker.size() > m_max_requests) {
+    if(m_workqueue.size() > m_max_requests) {
         m_queuelocker.unlock();
         return false;
     }
@@ -103,7 +103,7 @@ void* threadpool<T>::worker(void * arg) {
 
 template<typename T>
 void threadpool<T>::run() {
-    while(!m_stop()) {
+    while(!m_stop) {
         m_queuestat.wait();
         m_queuelocker.lock();
         if(m_workqueue.empty()) {

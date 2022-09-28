@@ -97,11 +97,44 @@ int main(int argc, char* argv[])
                 struct sockaddr_in client_address;
                 socklen_t client_addrlen = sizeof(client_address);
 
-                accept(listenfd, (struct sockaddr*)&client_address, &client_addrlen);
+                int connfd = accept(listenfd, (struct sockaddr*)&client_address, &client_addrlen);
+
+                // 目前连接数满了
+                if(http_conn::m_user_count >= MAX_FD) {
+                    close(connfd);
+                    continue;
+                }
+
+                // 将新的客户的数据初始化，放到数组
+                users[connfd].init(connfd, client_address);
+
+            } else if(events[i].events &(EPOLLRDHUP | EPOLLHUP | EPOLLERR)) { // 处理异常
+                // 对方异常断开或错误
+                users[sockfd].close_conn();
+            } else if(events[i].events & EPOLLIN) {
+                // 检测读行为
+                if(users[sockfd].read()) {
+                    // 一次性把数据读出来
+                    pool->append(users + sockfd);
+                } else {
+                    // 读失败
+                    users[sockfd].close_conn();
+                }
+            } else if(events[i].events & EPOLLOUT) {
+                // 检测写行为
+                if(!users[sockfd].write()) {
+                    // 一次性把数据写完
+                    users[sockfd].close_conn();
+                }
             }
         }
 
     }
+
+    close(epollfd);
+    close(listenfd);
+    delete [] users;
+    delete pool;
 
     return 0;
 }
