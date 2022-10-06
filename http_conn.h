@@ -1,23 +1,25 @@
 #ifndef HTTPCONNECTION_H
 #define HTTPCONNECTION_H
 
-#include <sys/epoll.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <sys/epoll.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <assert.h>
 #include <sys/stat.h>
+#include <string.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <stdarg.h>
 #include <errno.h>
 #include "locker.h"
 #include <sys/uio.h>
-#include <string.h>
 
 class http_conn {
 public:
@@ -25,6 +27,7 @@ public:
     static int m_user_count; // 统计用户的数量
     static const int READ_BUFFER_SIZE = 2048; // 读缓冲区大小
     static const int WRITE_BUFFER_SIZE = 1024; // 写缓冲区大小
+    static const int FILENAME_LEN = 200; // 文件名的最大长度
 
     // http请求方法，只支持GET
     enum METHOD {GET = 0, POST, HEAD, PUT, DELETE, TRACE, OPTIONS, CONNECT};
@@ -74,18 +77,43 @@ private:
     int m_start_line; // 当前正在解析的行的起始位置
     char *m_url; // 请求目标文件的文件名
     char *m_version; // 协议版本，http1.1
+
     METHOD m_method; // 请求方法
+    CHECK_STATE m_check_state; // 主状态机当前状态
+
     char *m_host; // 主机名
     bool m_linger; // 判断http请求是否保持连接
+    int m_content_length; // http请求的消息总长度
+    char m_real_file[FILENAME_LEN]; // 客户请求的目标文件的完整路径，内容等于doc_root(网站根目录)+m_url
+    
+    char* m_file_address; // 客户请求的目标文件被mmap到内存中的起始位置
+    struct stat m_file_stat; // 目标文件的状态，通过其判断文件是否存在、是否为目录、是否可读，并获取文件大小等信息
+    int m_write_index; // 写缓冲区中待发送的字节数
+    char m_write_buff[WRITE_BUFFER_SIZE]; // 写缓冲区
+    struct iovec m_iv[2]; // 采用writev来执行写操作，所以定义下面两个成员，其中m_iv_count表示被写内存块的数量
+    int m_iv_count;
 
-    CHECK_STATE m_check_state; // 主状态机当前状态
+    int bytes_to_send; // 将要发送的数据的字节数
+    int bytes_have_send; // 已经发送的字节数
 
     void init(); // 初始化连接其余的信息
     
+    // 被process_read调用以分析http请求
     HTTP_CODE process_read(); // 解析HTTP请求
     HTTP_CODE parse_request_line(char *text); // 解析请求首行
     HTTP_CODE parse_headers(char *text); // 解析请求头
     HTTP_CODE parse_content(char *text); // 解析请求体
+
+    // 这一组函数被process_write调用以填充HTTP应答。
+    void unmap();
+    bool add_response( const char* format, ... );
+    bool add_content( const char* content );
+    bool add_content_type();
+    bool add_status_line( int status, const char* title );
+    bool add_headers( int content_length );
+    bool add_content_length( int content_length );
+    bool add_linger();
+    bool add_blank_line();
 
     LINE_STATUS parse_line(); // 解析一行
     

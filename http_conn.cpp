@@ -3,6 +3,20 @@
 int http_conn::m_epollfd = -1; // 所有的socket上的事件都被注册到同一个epoll事件中
 int http_conn::m_user_count = 0; // 统计用户的数量
 
+// 定义HTTP响应的一些状态信息
+const char* ok_200_title = "OK";
+const char* error_400_title = "Bad Request";
+const char* error_400_form = "Your request has bad syntax or is inherently impossible to satisfy.\n";
+const char* error_403_title = "Forbidden";
+const char* error_403_form = "You do not have permission to get file from this server.\n";
+const char* error_404_title = "Not Found";
+const char* error_404_form = "The requested file was not found on this server.\n";
+const char* error_500_title = "Internal Error";
+const char* error_500_form = "There was an unusual problem serving the requested file.\n";
+
+// 网站的根目录
+const char* doc_root = "/home/webserver/resources";
+
 
 // 设置文件描述符非阻塞
 void setnonblocking(int fd) {
@@ -20,7 +34,7 @@ void addfd(int epollfd, int fd, bool one_shot) {
 
     // one_shot使一个socket连接在任一时刻都只被一个线程处理
     if(one_shot) {
-        event.events | EPOLLONESHOT;
+        event.events | EPOLLONESHOT; // 防止同一个通信被不同的线程处理
     }
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
 
@@ -199,12 +213,48 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text) {
     return NO_REQUEST;
 }
 
+// 解析http请求一个头部信息
 http_conn::HTTP_CODE http_conn::parse_headers(char *text) {
-
+    // 遇到空行，表示头部字段解析完毕
+    if(text[0] == '\0') {
+        // 如果http请求有消息体，则还需要读取m_content_length字节的消息体
+        // 状态机转移到CHECK_STATE_CONTENT状态
+        if(m_content_length != 0) {
+            m_check_state = CHECK_STATE_CONTENT;
+            return NO_REQUEST;
+        }
+        // 否则说明已经得到一个完整的http请求
+        return GET_REQUEST;
+    } else if (strncasecmp(text, "Connection:", 11) == 0) {
+        // 处理Connection头部字段
+        text += 11;
+        text += strspn(text, " \t");
+        if(strncasecmp(text, "keep-alive") == 0) {
+            m_linger = true;
+        }
+    } else if(strncasecmp(text, "Content-Length:", 15) == 0) {
+        // 处理content-length头部字段
+        text += 15;
+        text += strspn(text, " \t");
+        m_content_length = atol(text);
+    } else if(strncasecmp(text, "Host:", 5) == 0) {
+        // 处理host头部字段
+        text += 5;
+        text += strspn(text, " \t");
+        m_host = text;
+    } else {
+        printf("opp! unkonwn header %s\n", text);
+    }
+    return NO_REQUEST;
 }
 
+// 没有真正解析http请求的消息体，只是判断是否被完整读入
 http_conn::HTTP_CODE http_conn::parse_content(char *text) {
-    
+    if(m_read_index >= (m_content_length + m_checked_index)) {
+        text[m_content_length] = '\0';
+        return GET_REQUEST;
+    }
+    return NO_REQUEST;
 }
 
 // 解析一行，判断依据\r和\n
@@ -234,14 +284,119 @@ http_conn::LINE_STATUS http_conn::parse_line() {
     }
 }
 
+// 得到一个完整正确的http请求时，分析目标文件的属性
+// 如果目标文件存在且对所有用户可读，且不是目录，使用mmap映射到内存地址m_file_address处，并告诉调用者获取文件成功
 http_conn::HTTP_CODE http_conn::do_request() {
+    // /home/webserver/resources
+    strcpy(m_real_file, doc_root);
+    int len = strlen(doc_root);
+    strcpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    // 获取mrealfile文件的状态信息，-1失败0成功
+    if(stat(m_real_file, &m_file_stat) < 0) {
+        return NO_REQUEST;
+    }
 
+    // 判断访问权限
+    if(!(m_file_stat.st_mode & S_IROTH)) {
+        return FORBIDDEN_REQUEST;
+    }
+
+    // 判断是否是目录
+    if(S_ISDIR(m_file_stat.st_mode)) {
+        return BAD_REQUEST;
+    }
+
+    // 以只读方式打开文件
+    int fd = open(m_real_file, O_RDONLY);
+    // 创建内存映射
+    m_file_address = (char*)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    return FILE_REQUEST;
 }
 
-//
+// 对内存映射区执行munmao操作
+void http_conn::unmap() {
+    if(m_file_address) {
+        munmap(m_file_address, m_file_stat.st_size);
+        m_file_address = 0;
+    }
+}
+
+// 写http响应
 bool http_conn::write() {
-    printf("一次性写完数据\n");
+    int temp = 0;
+
+    if(bytes_to_send == 0) {
+        // 将要发送的字节是0，这一次响应结束
+        modfd(m_epollfd, m_sockfd, EPOLLIN);
+        init();
+        return true;
+    }
+
+    while(1) {
+        // 分散写
+        temp = writev(m_sockfd, m_iv, m_iv_count);
+        if(temp <= -1) {
+            // 如果tcp写缓冲没有空间，等待下一轮epollin事件
+            // 此期间服务器无法立即接收到同一客户的下一请求，但保证连接的完整性
+            if(errno == EAGAIN) {
+                modfd(m_epollfd, m_sockfd, EPOLLOUT);
+                return true;
+            }
+            unmap();
+            return false;
+        }
+
+        bytes_have_send += temp;
+        bytes_to_send -= temp;
+
+        if(bytes_have_send >= m_iv[0].iov_len) {
+            m_iv[0].iov_len = 0;
+            m_iv[1].iov_base = m_file_address + (bytes_have_send - m_write_index);
+            m_iv[1].iov_len = bytes_to_send;
+        } else {
+            m_iv[0].iov_base = m_write_buff + bytes_have_send;
+            m_iv[0].iov_len = m_iv[0].iov_len - temp;
+        }
+
+        if(bytes_to_send <= 0) {
+            // 没有数据要发送
+            unmap();
+            modfd(m_epollfd, m_sockfd, EPOLLIN);
+
+            if(m_linger) {
+                init();
+                return true;
+            } else {
+                return false;
+            }
+        }
+    }
+}
+
+// 往写缓存中写入待发送的数据
+bool http_conn::add_response(const char* format, ...) {
+    if(m_write_index >= WRITE_BUFFER_SIZE) {
+        return false;
+    }
+    va_list arg_list;
+    va_start(arg_list, format);
+    int len = vsnprintf(m_write_buff + m_write_index, WRITE_BUFFER_SIZE - 1 - m_write_index, format, arg_list);
+    if(len >= (WRITE_BUFFER_SIZE - 1 - m_write_index)) { // 写不下了
+        return false;
+    }
+    m_write_index += len;
+    va_end(arg_list);
     return true;
+}
+
+bool http_conn::add_status_line(int status, const char* title) {
+    return add_response("%s %d %s\r\n", "HTTP/1.1", status, title);
+}
+
+// 根据服务器处理http请求的结果，决定返回给客户端的内容
+bool http_conn::process_write(HTTP_CODE ret) {
+
 }
 
 // 由线程池中的工作线性调用，这是处理http请求的入口函数
@@ -255,5 +410,9 @@ void http_conn::process() {
     
     
     // 生成响应
-
+    bool write_ret = process_write(read_ret);
+    if(!write_ret) {
+        close_conn();
+    }
+    modfd(m_epollfd, m_sockfd, EPOLLOUT);
 }
