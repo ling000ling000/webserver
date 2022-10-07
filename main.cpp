@@ -115,7 +115,7 @@ int main(int argc, char* argv[])
                 // 检测读行为
                 if(users[sockfd].read()) {
                     // 一次性把数据读出来
-                    pool->append(users + sockfd);
+                    pool->append(users + sockfd); // 添加到线程池队列中
                 } else {
                     // 读失败
                     users[sockfd].close_conn();
@@ -123,7 +123,7 @@ int main(int argc, char* argv[])
             } else if(events[i].events & EPOLLOUT) {
                 // 检测写行为
                 if(!users[sockfd].write()) {
-                    // 一次性把数据写完
+                    // 可以写的时候一次性把数据写完
                     users[sockfd].close_conn();
                 }
             }

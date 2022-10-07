@@ -97,6 +97,7 @@ private:
     int bytes_have_send; // 已经发送的字节数
 
     void init(); // 初始化连接其余的信息
+    bool process_write( HTTP_CODE ret ); // 填充HTTP应答
     
     // 被process_read调用以分析http请求
     HTTP_CODE process_read(); // 解析HTTP请求
@@ -106,12 +107,12 @@ private:
 
     // 这一组函数被process_write调用以填充HTTP应答。
     void unmap();
-    bool add_response( const char* format, ... );
-    bool add_content( const char* content );
+    bool add_response(const char* format, ...);
+    bool add_content(const char* content);
     bool add_content_type();
-    bool add_status_line( int status, const char* title );
-    bool add_headers( int content_length );
-    bool add_content_length( int content_length );
+    bool add_status_line(int status, const char* title);
+    bool add_headers(int content_length);
+    bool add_content_length(int content_length);
     bool add_linger();
     bool add_blank_line();
 
