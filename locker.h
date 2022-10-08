@@ -59,7 +59,9 @@ public:
     }
 
     bool wait(pthread_mutex_t *mutex) {
-        return pthread_cond_wait(&m_cond, mutex) == 0;
+        int ret = 0;
+        ret = pthread_cond_wait(&m_cond, mutex) == 0;
+        return ret == 0;
     }
 
     // 超时时间

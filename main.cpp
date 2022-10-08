@@ -22,7 +22,7 @@ void addsig(int sig, void(handler)(int)) {
     memset(&sa, '\0', sizeof(sa));
     sa.sa_handler = handler;
     sigfillset(&sa.sa_mask);
-    sigaction(sig, &sa, NULL);
+    assert(sigaction(sig, &sa, NULL) != -1);
 }
 
 // 添加文件描述符到epoll
@@ -30,14 +30,14 @@ extern void addfd(int epollfd, int fd, bool one_shot);
 // 从epoll中删除文件描述符
 extern void removefd(int epollfd, int fd);
 // 从epoll中修改文件描述符
-extern void modfd(int epollfd, int fd, int ev);
+// extern void modfd(int epollfd, int fd, int ev);
 
 int main(int argc, char* argv[])
 {
     if(argc <= 1)
     {
         printf("按照如下格式运行：%s port_number\n", basename(argv[0]));
-        exit(-1);
+        return 1;
     }
 
     // 获取端口号
