@@ -19,10 +19,11 @@ const char* doc_root = "/home/acs/webserver/resources";
 
 
 // 设置文件描述符非阻塞
-void setnonblocking(int fd) {
+int setnonblocking(int fd) {
     int old_flag = fcntl(fd, F_GETFL);
     int new_flag = old_flag | O_NONBLOCK;
     fcntl(fd, F_SETFL, new_flag);
+    return old_flag;
 }
 
 // 向epoll添加需要监听的文件描述符
@@ -34,7 +35,7 @@ void addfd(int epollfd, int fd, bool one_shot) {
 
     // one_shot使一个socket连接在任一时刻都只被一个线程处理
     if(one_shot) {
-        event.events | EPOLLONESHOT; // 防止同一个通信被不同的线程处理
+        event.events |= EPOLLONESHOT; // 防止同一个通信被不同的线程处理
     }
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
 
@@ -54,7 +55,7 @@ void removefd(int epollfd, int fd) {
 void modfd(int epollfd, int fd, int ev) {
     epoll_event event;
     event.data.fd = fd;
-    event.events = ev | EPOLLONESHOT | EPOLLRDHUP;
+    event.events = ev | EPOLLET | EPOLLONESHOT | EPOLLRDHUP;
     epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &event);
 }
 
@@ -77,6 +78,9 @@ void http_conn::init(int sockfd, const sockaddr_in &addr) {
 
 // (函数重载)
 void http_conn::init() {
+    bytes_to_send = 0;
+    bytes_have_send = 0;
+
     m_check_state = CHECK_STATE_REQUESTLINE; // 初始化状态为解析请求首行
     m_checked_index = 0;
     m_start_line = 0;
@@ -85,8 +89,13 @@ void http_conn::init() {
     m_url = 0;
     m_version = 0;
     m_linger = false;
+    m_content_length = 0;
+    m_host = 0;
+    m_write_index = 0;
 
     bzero(m_read_buff, READ_BUFFER_SIZE); // 全部置为0
+    bzero(m_write_buff, READ_BUFFER_SIZE);
+    bzero(m_real_file, FILENAME_LEN);
 }
 
 // 关闭连接
@@ -121,7 +130,6 @@ bool http_conn::read() {
         }
         m_read_index += byte_read; // 因为已经读入了新数据，要更新索引
     }
-    printf("读取到了数据：%s\n", m_read_buff);
     return true;
 }
 
@@ -133,32 +141,30 @@ http_conn::HTTP_CODE http_conn::process_read() {
     char *text = 0;
 
     // 解析到了一行完整的数据或者解析到了请求体，也是完成的数据
-    while((m_check_state == CHECK_STATE_CONTENT && line_status == LINE_OK) || (line_status = parse_line()) == LINE_OK) {
+    while(((m_check_state == CHECK_STATE_CONTENT) && (line_status == LINE_OK)) || ((line_status = parse_line()) == LINE_OK)) {
         // 获取一行数据
         text = get_line();
         m_start_line = m_checked_index;
         printf("got 1 http line: %s\n", text);
 
         switch(m_check_state) {
-            case CHECK_STATE_REQUESTLINE:
-            {
+            case CHECK_STATE_REQUESTLINE: {
                 ret = parse_request_line(text);
                 if(ret == BAD_REQUEST) {
                     return BAD_REQUEST;
                 }
                 break;
             }
-            case CHECK_STATE_HEADER:
-            {
+            case CHECK_STATE_HEADER: {
                 ret = parse_headers(text);
                 if(ret == BAD_REQUEST) {
                     return BAD_REQUEST;
                 } else if(ret == GET_REQUEST) {
                     return do_request(); // 解析具体的内容
                 }
+                break;
             }
-            case CHECK_STATE_CONTENT:
-            {
+            case CHECK_STATE_CONTENT: {
                 ret = parse_content(text);
                 if(ret == GET_REQUEST) {
                     return do_request();
@@ -166,8 +172,7 @@ http_conn::HTTP_CODE http_conn::process_read() {
                 line_status = LINE_OPEN;
                 break;
             }
-            default:
-            {
+            default: {
                 return INTERNAL_ERROR;
             }
         }
@@ -178,7 +183,10 @@ http_conn::HTTP_CODE http_conn::process_read() {
 // 解析http请求行，获取请求方法、目标url、http版本
 http_conn::HTTP_CODE http_conn::parse_request_line(char *text) {
     // GET /index.html HTTP/1.1
-    m_url = strpbrk(text, " \t");
+    m_url = strpbrk(text, " \t"); // 判断第二个参数中的字符哪个在text中最先出现
+    if(!m_url) {
+        return BAD_REQUEST;
+    }
     // GET\0/index.html HTTP/1.1
     *m_url ++ = '\0';
 
@@ -243,7 +251,7 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text) {
         text += strspn(text, " \t");
         m_host = text;
     } else {
-        printf("opp! unkonwn header %s\n", text);
+        printf("oop! unkonwn header %s\n", text);
     }
     return NO_REQUEST;
 }
@@ -261,10 +269,10 @@ http_conn::HTTP_CODE http_conn::parse_content(char *text) {
 http_conn::LINE_STATUS http_conn::parse_line() {
     char temp;
 
-    for(; m_checked_index < m_read_index; m_checked_index ++) {
+    for(; m_checked_index < m_read_index; ++ m_checked_index) {
         temp = m_read_buff[m_checked_index];
         if(temp == '\r') {
-            if(m_checked_index + 1 == m_read_index) { // 检查的位置+1刚好是读取到的位置
+            if((m_checked_index + 1) == m_read_index) { // 检查的位置+1刚好是读取到的位置
                 return LINE_OPEN;
             } else if(m_read_buff[m_checked_index + 1] == '\n') {
                 m_read_buff[m_checked_index ++] = '\0';
@@ -273,7 +281,7 @@ http_conn::LINE_STATUS http_conn::parse_line() {
             }
             return LINE_BAD;
         } else if(temp == '\n') {
-            if(m_checked_index > 1 && m_read_buff[m_checked_index - 1] == '\r') { // 检查\n前面是不是\r
+            if((m_checked_index > 1) && (m_read_buff[m_checked_index - 1] == '\r')) { // 检查\n前面是不是\r
                 m_read_buff[m_checked_index - 1] = '\0';
                 m_read_buff[m_checked_index ++] = '\0';
                 return LINE_OK;
@@ -293,7 +301,7 @@ http_conn::HTTP_CODE http_conn::do_request() {
     strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
     // 获取mrealfile文件的状态信息，-1失败0成功
     if(stat(m_real_file, &m_file_stat) < 0) {
-        return NO_REQUEST;
+        return NO_RESOURCE;
     }
 
     // 判断访问权限
@@ -350,11 +358,12 @@ bool http_conn::write() {
         bytes_have_send += temp;
         bytes_to_send -= temp;
 
+        // 头已经发送完毕
         if(bytes_have_send >= m_iv[0].iov_len) {
             m_iv[0].iov_len = 0;
             m_iv[1].iov_base = m_file_address + (bytes_have_send - m_write_index);
             m_iv[1].iov_len = bytes_to_send;
-        } else {
+        } else { // 没有发送完毕的话
             m_iv[0].iov_base = m_write_buff + bytes_have_send;
             m_iv[0].iov_len = m_iv[0].iov_len - temp;
         }
@@ -412,7 +421,7 @@ bool http_conn::add_content_length(int content_len) {
 }
 
 bool http_conn::add_linger() {
-    return add_response("Connection: %s\r\n", (m_linger == true) ? "keep-alive" : "close");
+    return add_response("Connection: %s\r\n", ( m_linger == true ) ? "keep-alive" : "close");
 }
 
 bool http_conn::add_content_type() {
@@ -429,7 +438,7 @@ bool http_conn::process_write(HTTP_CODE ret) {
         case INTERNAL_ERROR:
             add_status_line(500, error_500_title);
             add_headers(strlen(error_500_form));
-            if(!http_conn::add_content(error_500_form)) {
+            if(!add_content(error_500_form)) {
                 return false;
             }
             break;
@@ -443,7 +452,7 @@ bool http_conn::process_write(HTTP_CODE ret) {
         case NO_RESOURCE:
             add_status_line(404, error_404_title);
             add_headers(strlen(error_404_form));
-            if(!http_conn::add_content(error_404_form)) {
+            if(!add_content(error_404_form)) {
                 return false;
             }
             break;

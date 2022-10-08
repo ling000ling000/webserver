@@ -98,12 +98,15 @@ private:
 
     void init(); // 初始化连接其余的信息
     bool process_write( HTTP_CODE ret ); // 填充HTTP应答
+    HTTP_CODE process_read(); // 解析HTTP请求
     
     // 被process_read调用以分析http请求
-    HTTP_CODE process_read(); // 解析HTTP请求
     HTTP_CODE parse_request_line(char *text); // 解析请求首行
     HTTP_CODE parse_headers(char *text); // 解析请求头
     HTTP_CODE parse_content(char *text); // 解析请求体
+    HTTP_CODE do_request();
+    char *get_line() {return m_read_buff + m_start_line;} // 获取一行数据
+    LINE_STATUS parse_line(); // 解析一行
 
     // 这一组函数被process_write调用以填充HTTP应答。
     void unmap();
@@ -115,12 +118,8 @@ private:
     bool add_content_length(int content_length);
     bool add_linger();
     bool add_blank_line();
-
-    LINE_STATUS parse_line(); // 解析一行
     
-    char *get_line() {return m_read_buff + m_start_line;} // 获取一行数据
 
-    HTTP_CODE do_request();
 };
 
 

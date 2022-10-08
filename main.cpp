@@ -51,7 +51,7 @@ int main(int argc, char* argv[])
     try {
         pool = new threadpool<http_conn>;
     } catch(...) {
-        exit(-1);
+        return 1;
     }
 
     // 创建一个数组，保存客户信息
@@ -65,14 +65,15 @@ int main(int argc, char* argv[])
     setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     // 绑定
+    int ret = 0;
     struct sockaddr_in address;
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port);
-    bind(listenfd, (struct sockaddr*)&address, sizeof(address));
+    ret = bind(listenfd, (struct sockaddr*)&address, sizeof(address));
 
     // 监听
-    listen(listenfd, 5);
+    ret = listen(listenfd, 5);
 
     // 创建epoll对象，事件数组，添加
     epoll_event events[MAX_EVENT_NUMBER];
@@ -85,7 +86,7 @@ int main(int argc, char* argv[])
     // 循环检测事件发生
     while(1) {
         int num = epoll_wait(epollfd, events, MAX_EVENT_NUMBER, -1);
-        if(num < 0 && errno != EINTR) {
+        if((num < 0) && (errno != EINTR)) {
             printf("epoll failure\n");
             break;
         } 
@@ -98,6 +99,11 @@ int main(int argc, char* argv[])
                 socklen_t client_addrlen = sizeof(client_address);
 
                 int connfd = accept(listenfd, (struct sockaddr*)&client_address, &client_addrlen);
+
+                if(connfd < 0) {
+                    printf("errno is: %d\n", errno);
+                    continue;
+                }
 
                 // 目前连接数满了
                 if(http_conn::m_user_count >= MAX_FD) {
