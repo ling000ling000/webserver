@@ -3,9 +3,10 @@
 
 #include <pthread.h>
 #include <list>
-#include "locker.h"
 #include <exception>
 #include <cstdio>
+
+#include "../lock/locker.h"
 
 // 线程池类，定义成模板类是为了代码复用
 template<typename T>
