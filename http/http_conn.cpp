@@ -14,33 +14,40 @@ const char* error_500_form = "There was an unusual problem serving the requested
 // 网站的根目录
 const char* doc_root = "/home/acs/webserver/resources";
 
+// 该函数将传入的文件描述符 fd 设置为非阻塞模式
+// 在非阻塞模式下，当数据不可用时，读取操作会立即返回0，写入操作会立即返回-1，并将 errno 设置为 EAGAIN 或 EWOULDBLOCK（表示暂时无法完成的操作）
+// 这可以避免程序在等待数据或缓冲区可用时被阻塞，从而提高程序的并发性能
 int setnonblocking(int fd) 
 {
-    int old_option = fcntl(fd, F_GETFL);
-    int new_option = old_option | O_NONBLOCK;
-    fcntl(fd, F_SETFL, new_option);
+    int old_option = fcntl(fd, F_GETFL); // 获取 fd 的旧文件描述符选项
+    int new_option = old_option | O_NONBLOCK; // 计算新的文件描述符选项
+    fcntl(fd, F_SETFL, new_option); // 使用 fcntl 函数将 fd 的选项设置为新的文件描述符选项
     return old_option;
 }
 
 // 向epoll中添加需要监听的文件描述符
+// 使得程序能够通过 epoll_wait 函数等待和监控该文件描述符上的事件
 void addfd(int epollfd, int fd, bool one_shot) 
 {
     epoll_event event;
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLRDHUP;
+    event.events = EPOLLIN | EPOLLRDHUP; // 将事件类型设置为 EPOLLIN（表示可读事件）和 EPOLLRDHUP（表示对端关闭连接）
+    // 参数 one_shot 主要用于控制是否启用 EPOLLONESHOT 选项。
+    // 如果启用该选项，则在监控到一次该文件描述符上的事件后，该文件描述符将自动从 epoll 实例中删除。
+    // 这可以保证 不同的线程 不会同时处理 同一个文件描述符上的事件。
     if(one_shot) 
     {
-        // 防止同一个通信被不同的线程处理
-        event.events |= EPOLLONESHOT;
+        event.events |= EPOLLONESHOT; // 防止同一个通信被不同的线程处理
     }
-    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
-    // 设置文件描述符非阻塞
-    setnonblocking(fd);  
+    epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event); // 向 epoll 实例中添加文件描述符 fd 和对应的事件 event
+    setnonblocking(fd); // 设置文件描述符非阻塞
 }
 
 // 从epoll中移除监听的文件描述符
 void removefd(int epollfd, int fd) 
 {
+    // 将操作类型设置为 EPOLL_CTL_DEL 表示删除该文件描述符
+    // 第四个参数为 0，表示不需要传递事件结构体
     epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, 0);
     close(fd);
 }
