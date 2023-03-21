@@ -82,24 +82,27 @@ void http_conn::init(int sockfd, const sockaddr_in& addr)
     m_sockfd = sockfd;
     m_address = addr;
     
-    // 端口复用
+    // 设置套接字选项 SO_REUSEADDR，以启用端口复用。
+    // 这意味着如果之前绑定到该端口的套接字处于 TIME_WAIT 状态，该端口可以立即重新使用。
     int reuse = 1;
     setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    addfd(m_epollfd, sockfd, true);
-    m_user_count++;
+    addfd(m_epollfd, sockfd, true); // 将套接字文件描述符 sockfd 添加到 epoll 实例中，以监听该套接字上的事件。
+    m_user_count ++;
     init();
 }
 
+// 重置 HTTP 连接对象的各个成员变量，以便在处理下一个客户端请求时可以使用一个干净的状态。
+// 通过清空缓冲区和文件名等数据，可以避免之前处理的数据对当前请求的处理产生干扰。
 void http_conn::init()
 {
 
     bytes_to_send = 0;
     bytes_have_send = 0;
 
-    m_check_state = CHECK_STATE_REQUESTLINE;    // 初始状态为检查请求行
-    m_linger = false;       // 默认不保持链接  Connection : keep-alive保持连接
+    m_check_state = CHECK_STATE_REQUESTLINE; // 初始状态为检查请求行
+    m_linger = false; // 默认不保持链接  Connection : keep-alive保持连接
 
-    m_method = GET;         // 默认请求方式为GET
+    m_method = GET; // 默认请求方式为GET
     m_url = 0;              
     m_version = 0;
     m_content_length = 0;
@@ -109,35 +112,37 @@ void http_conn::init()
     m_read_idx = 0;
     m_write_idx = 0;
 
+    // 全部设置为 0 或空字符串，以清空缓冲区和文件名。
     bzero(m_read_buf, READ_BUFFER_SIZE);
     bzero(m_write_buf, READ_BUFFER_SIZE);
     bzero(m_real_file, FILENAME_LEN);
 }
 
 
-// 循环读取客户数据，直到无数据可读或者对方关闭连接
+// 循环读取客户数据，并将其存储到 HTTP 连接对象的读缓冲区中
 bool http_conn::read() 
 {
     if(m_read_idx >= READ_BUFFER_SIZE) 
     {
         return false;
     }
+
     int bytes_read = 0;
-    while(true) {
+    while(true) 
+    {
         // 从m_read_buf + m_read_idx索引出开始保存数据，大小是READ_BUFFER_SIZE - m_read_idx
-        bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, 
-        READ_BUFFER_SIZE - m_read_idx, 0 );
-        if (bytes_read == -1) 
+        bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0 );
+        if (bytes_read == -1) //  -1 则表示读取出错，需要根据具体的错误码进行处理
         {
+            // 如果是 EAGAIN 或 EWOULDBLOCK 错误，则表示当前没有数据可读，可以退出循环等待下一次读取。
             if(errno == EAGAIN || errno == EWOULDBLOCK) 
             {
-                // 没有数据
-                break;
+                break; // 没有数据
             }
             return false;   
         } 
-        else if (bytes_read == 0) 
-        {   // 对方关闭连接
+        else if (bytes_read == 0) // 表示对方已经关闭了连接，需要退出读取循环并返回 false。
+        {
             return false;
         }
         m_read_idx += bytes_read;
@@ -145,26 +150,27 @@ bool http_conn::read()
     return true;
 }
 
-// 解析一行，判断依据\r\n
+// 解析HTTP请求报文中的每一行数据。
+// 在一个 while 循环中执行的，每次循环会取出 m_read_buf 中的一个字符进行解析，直到读取完所有的字符为止。判断依据\r\n
 http_conn::LINE_STATUS http_conn::parse_line() 
 {
     char temp;
-    for ( ; m_checked_idx < m_read_idx; ++m_checked_idx)
+    for ( ; m_checked_idx < m_read_idx; ++ m_checked_idx)
     {
         temp = m_read_buf[m_checked_idx];
         if (temp == '\r') 
         {
             if ((m_checked_idx + 1 ) == m_read_idx) 
             {
-                return LINE_OPEN;
+                return LINE_OPEN; // 未完整读取当前行，需要继续读取。
             } 
             else if (m_read_buf[ m_checked_idx + 1] == '\n') 
             {
                 m_read_buf[m_checked_idx++] = '\0';
                 m_read_buf[m_checked_idx++] = '\0';
-                return LINE_OK;
+                return LINE_OK; // 解析成功，当前行是一个完整的行，包括 \r\n 结束符。
             }
-            return LINE_BAD;
+            return LINE_BAD; // 解析失败，当前行有语法错误或格式不正确。
         } 
         else if(temp == '\n')  
         {
@@ -183,32 +189,41 @@ http_conn::LINE_STATUS http_conn::parse_line()
 // 解析HTTP请求行，获得请求方法，目标URL,以及HTTP版本号
 http_conn::HTTP_CODE http_conn::parse_request_line(char* text) 
 {
-    // GET /index.html HTTP/1.1
-    m_url = strpbrk(text, " \t"); // 判断第二个参数中的字符哪个在text中最先出现
+    // 当前请求行：GET /index.html HTTP/1.1
+
+    // 使用strpbrk函数在text字符串中查找第一个出现空格或制表符的位置，将其作为URL的起始位置
+    //如果没有找到则返回错误状态码BAD_REQUEST。
+    m_url = strpbrk(text, " \t"); 
     if (!m_url) 
     { 
         return BAD_REQUEST;
     }
 
-    // GET\0/index.html HTTP/1.1
-    *m_url ++ = '\0';    // 置位空字符，字符串结束符
+    // 将找到的URL的起始位置处置为字符串结束符
+    *m_url ++ = '\0'; // 此时的请求行：GET\0/index.html HTTP/1.1
     char* method = text;
-    if (strcasecmp(method, "GET") == 0) 
-    { // 忽略大小写比较
+    // 将请求方法设为GET，并检查是否合法
+    if (strcasecmp(method, "GET") == 0) // 忽略大小写比较
+    { 
         m_method = GET;
     } 
     else 
     {
         return BAD_REQUEST;
     }
+
     // /index.html HTTP/1.1
-    // 检索字符串 str1 中第一个不在字符串 str2 中出现的字符下标。
+    // 使用strpbrk函数在URL字符串中查找第一个出现空格或制表符的位置，将其作为版本号的起始位置。
+    // 如果没有找到则返回错误状态码BAD_REQUEST。
     m_version = strpbrk(m_url, " \t");
     if (!m_version) 
     {
         return BAD_REQUEST;
     }
-    *m_version++ = '\0';
+
+    //将版本号的起始位置处置为字符串结束符，并检查版本号是否为HTTP/1.1。
+    // 如果不是则返回错误状态码BAD_REQUEST。
+    *m_version ++ = '\0'; // 此时的请求行：/index.html\0HTTP/1.1
     if (strcasecmp(m_version, "HTTP/1.1") != 0) 
     {
         return BAD_REQUEST;
@@ -216,12 +231,14 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char* text)
     /**
      * http://192.168.110.129:10000/index.html
     */
+    // 检查URL是否包含"//"，如果包含则跳过"http://"字符串
     if (strncasecmp(m_url, "http://", 7) == 0) 
     {   
         m_url += 7;
         // 在参数 str 所指向的字符串中搜索第一次出现字符 c（一个无符号字符）的位置。
         m_url = strchr(m_url, '/');
     }
+    // 接着查找"/"字符的位置，并将其设置为URL字符串的起始位置
     if (!m_url || m_url[0] != '/') 
     {
         return BAD_REQUEST;
@@ -231,6 +248,8 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char* text)
 }
 
 // 解析HTTP请求的一个头部信息
+// 包含了一些常见的头部字段，如Connection、Content-Length和Host。
+// 该函数接受一个指向文本的指针，逐行解析文本，并根据不同的头部字段进行处理。
 http_conn::HTTP_CODE http_conn::parse_headers(char* text) 
 {   
     // 遇到空行，表示头部字段解析完毕
@@ -248,7 +267,8 @@ http_conn::HTTP_CODE http_conn::parse_headers(char* text)
     } 
     else if (strncasecmp(text, "Connection:", 11 ) == 0) 
     {
-        // 处理Connection 头部字段  Connection: keep-alive
+        // 处理 Connection 头部字段
+        // 如果值为keep-alive，则设置m_linger为true，表示需要保持连接。
         text += 11;
         text += strspn(text, " \t");
         if ( strcasecmp(text, "keep-alive") == 0 ) 
@@ -261,14 +281,14 @@ http_conn::HTTP_CODE http_conn::parse_headers(char* text)
         // 处理Content-Length头部字段
         text += 15;
         text += strspn(text, " \t");
-        m_content_length = atol(text);
+        m_content_length = atol(text); // 将其值转换成整型并存储在m_content_length中，以便后续读取消息体。
     } 
     else if (strncasecmp(text, "Host:", 5) == 0) 
     {
         // 处理Host头部字段
         text += 5;
         text += strspn(text, " \t");
-        m_host = text;
+        m_host = text; // 将其值存储在m_host中，以便后续处理
     } 
     else 
     {
@@ -301,9 +321,10 @@ http_conn::HTTP_CODE http_conn::process_read()
         m_start_line = m_checked_idx;
         printf("got 1 http line: %s\n", text);
 
+        // 根据 m_check_state 变量的值，分别进行不同的处理
         switch(m_check_state) 
         {
-            case CHECK_STATE_REQUESTLINE: 
+            case CHECK_STATE_REQUESTLINE: // 解析请求行
             {
                 ret = parse_request_line(text);
                 if (ret == BAD_REQUEST) 
@@ -312,7 +333,7 @@ http_conn::HTTP_CODE http_conn::process_read()
                 }
                 break;
             }
-            case CHECK_STATE_HEADER: 
+            case CHECK_STATE_HEADER: // 解析请求头部
             {
                 ret = parse_headers( text );
                 if (ret == BAD_REQUEST) 
@@ -325,7 +346,7 @@ http_conn::HTTP_CODE http_conn::process_read()
                 }
                 break;
             }
-            case CHECK_STATE_CONTENT: 
+            case CHECK_STATE_CONTENT:  // 解析请求数据体
             {
                 ret = parse_content(text);
                 if (ret == GET_REQUEST) 
@@ -463,6 +484,7 @@ bool http_conn::add_response(const char* format, ...)
     {
         return false;
     }
+    
     va_list arg_list;
     va_start(arg_list, format);
     int len = vsnprintf(m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list);

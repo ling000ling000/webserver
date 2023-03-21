@@ -130,9 +130,9 @@ int main(int argc, char* argv[])
                 // 对方异常断开或错误
                 users[sockfd].close_conn();
             } 
-            else if(events[i].events & EPOLLIN) 
+            else if(events[i].events & EPOLLIN) // 检测读行为
             {
-                // 检测读行为
+                
                 if(users[sockfd].read()) 
                 {
                     // 一次性把数据读出来
@@ -144,9 +144,9 @@ int main(int argc, char* argv[])
                     users[sockfd].close_conn();
                 }
             } 
-            else if(events[i].events & EPOLLOUT) 
+            else if(events[i].events & EPOLLOUT) // 检测写行为
             {
-                // 检测写行为
+                
                 if(!users[sockfd].write()) 
                 {
                     // 可以写的时候一次性把数据写完
